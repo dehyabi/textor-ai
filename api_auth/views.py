@@ -10,8 +10,10 @@ from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
-from rest_framework import exceptions
 from .authentication import BearerTokenAuthentication
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Create your views here.
 
@@ -66,20 +68,31 @@ class LoginView(APIView):
     def post(self, request):
         username = request.data.get('username')
         password = request.data.get('password')
+        
+        print(f"Login attempt - Username: {username}")  # Debug print
 
         if not username or not password:
             return Response({
                 'error': 'Please provide username and password'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        user = authenticate(username=username, password=password)
+        # Check if user exists
+        try:
+            user_exists = User.objects.filter(username=username).exists()
+            print(f"User exists in database: {user_exists}")  # Debug print
+        except Exception as e:
+            print(f"Error checking user existence: {str(e)}")  # Debug print
+            
+        user = authenticate(request, username=username, password=password)
+        print(f"Authentication result: {'Success' if user else 'Failed'}")  # Debug print
 
         if not user:
             return Response({
                 'error': 'Invalid credentials'
             }, status=status.HTTP_401_UNAUTHORIZED)
 
-        token, _ = Token.objects.get_or_create(user=user)
+        token, created = Token.objects.get_or_create(user=user)
+        print(f"Token created: {created}, Token: {token.key}")  # Debug print
 
         return Response({
             'token': token.key,
