@@ -2,7 +2,7 @@ from django.shortcuts import render
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.authtoken.models import Token
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -10,6 +10,8 @@ from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
+from rest_framework import exceptions
+from .authentication import BearerTokenAuthentication
 
 # Create your views here.
 
@@ -84,3 +86,15 @@ class LoginView(APIView):
             'user_id': user.pk,
             'username': user.username
         })
+
+@method_decorator(csrf_exempt, name='dispatch')
+class LogoutView(APIView):
+    authentication_classes = [BearerTokenAuthentication]
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        # Simply delete the token to force a login
+        request.user.auth_token.delete()
+        return Response({
+            'message': 'Successfully logged out.'
+        }, status=status.HTTP_200_OK)
