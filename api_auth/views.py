@@ -30,6 +30,13 @@ class RegisterView(APIView):
                 'error': 'Please provide username, email and password'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Check if user limit is reached (excluding superusers)
+        regular_users_count = User.objects.filter(is_superuser=False).count()
+        if regular_users_count >= 5:
+            return Response({
+                'error': 'Maximum number of regular users (5) has been reached'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # Validate email
         try:
             validate_email(email)
