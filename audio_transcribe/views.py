@@ -6,6 +6,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 import requests
 import os
 import time
+import mimetypes
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,6 +14,27 @@ load_dotenv()
 ASSEMBLYAI_API_KEY = os.getenv('ASSEMBLYAI_API_KEY')
 UPLOAD_URL = "https://api.assemblyai.com/v2/upload"
 TRANSCRIPT_URL = "https://api.assemblyai.com/v2/transcript"
+
+# Supported audio formats
+SUPPORTED_FORMATS = {
+    # Audio formats
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+    '.flac': 'audio/flac',
+    '.aac': 'audio/aac',
+    '.ogg': 'audio/ogg',
+    '.wma': 'audio/x-ms-wma',
+    # Video formats (AssemblyAI can extract audio)
+    '.mp4': 'video/mp4',
+    '.avi': 'video/x-msvideo',
+    '.mov': 'video/quicktime',
+    '.wmv': 'video/x-ms-wmv',
+    '.webm': 'video/webm'
+}
+
+# Maximum file size (10MB)
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB in bytes
 
 # Supported languages by AssemblyAI
 SUPPORTED_LANGUAGES = {
@@ -36,10 +58,24 @@ headers = {
     "content-type": "application/json"
 }
 
-# Create your views here.
-
 class TranscriptionView(APIView):
     parser_classes = (MultiPartParser, FormParser)
+
+    def validate_file(self, file):
+        """Validate file format and size"""
+        # Check file size
+        if file.size > MAX_FILE_SIZE:
+            return False, f"File size exceeds maximum limit of {MAX_FILE_SIZE/1024/1024}MB"
+
+        # Get file extension and mime type
+        file_name = file.name.lower()
+        file_ext = os.path.splitext(file_name)[1]
+        
+        # Check if format is supported
+        if file_ext not in SUPPORTED_FORMATS:
+            return False, f"Unsupported file format. Supported formats: {', '.join(SUPPORTED_FORMATS.keys())}"
+
+        return True, "File is valid"
 
     def upload_file(self, audio_file):
         def read_file(file_obj):
@@ -91,6 +127,14 @@ class TranscriptionView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
+            # Validate file
+            is_valid, message = self.validate_file(audio_file)
+            if not is_valid:
+                return Response(
+                    {"error": message},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             # Get language code (optional)
             language_code = request.data.get('language_code')
             if language_code and language_code not in SUPPORTED_LANGUAGES:
@@ -104,6 +148,12 @@ class TranscriptionView(APIView):
 
             # Upload the file
             upload_response = self.upload_file(audio_file)
+            if 'upload_url' not in upload_response:
+                return Response({
+                    "error": "File upload failed",
+                    "details": upload_response.get('error', 'Unknown error')
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
             audio_url = upload_response['upload_url']
 
             # Request transcript with or without specific language
@@ -127,6 +177,7 @@ class TranscriptionView(APIView):
                     "detected_language": SUPPORTED_LANGUAGES.get(detected_language, detected_language),
                     "detected_language_code": detected_language,
                     "requested_language": SUPPORTED_LANGUAGES.get(language_code) if language_code else "auto",
+                    "audio_format": os.path.splitext(audio_file.name)[1][1:].upper(),
                     "status": "completed"
                 })
             else:
