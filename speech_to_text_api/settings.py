@@ -24,8 +24,10 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'rest_framework.authtoken',
     'corsheaders',
     'audio_transcribe',
+    'api_auth',
 ]
 
 MIDDLEWARE = [
@@ -90,18 +92,58 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# CORS settings
-CORS_ALLOW_ALL_ORIGINS = True
+# Security Settings
+SECURE_SSL_REDIRECT = False  # Disabled for development
+SECURE_HSTS_SECONDS = 31536000  # 1 year
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_BROWSER_XSS_FILTER = True
+SESSION_COOKIE_SECURE = False  # Disabled for development
+CSRF_COOKIE_SECURE = False  # Disabled for development
+X_FRAME_OPTIONS = 'DENY'
+
+# CORS Settings
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000"
+]
 CORS_ALLOW_CREDENTIALS = True
 
+# REST Framework settings
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle'
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '100/hour',  # Increased from 3 to 100
+        'user': '1000/hour'  # Increased from 100 to 1000
+    },
+    'DEFAULT_PARSER_CLASSES': [
+        'rest_framework.parsers.MultiPartParser',
+        'rest_framework.parsers.FormParser',
+        'rest_framework.parsers.JSONParser',
+    ],
+}
+
 # File Upload settings
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
 
 # URL settings
 APPEND_SLASH = True
 
 # CSRF settings
-CSRF_TRUSTED_ORIGINS = ['http://localhost:8000']
-CSRF_COOKIE_SECURE = False  # Set to True in production
+CSRF_TRUSTED_ORIGINS = ['http://localhost:3000']
 CSRF_USE_SESSIONS = False
 CSRF_COOKIE_HTTPONLY = False

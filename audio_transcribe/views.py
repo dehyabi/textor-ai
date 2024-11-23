@@ -3,10 +3,13 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
 import requests
 import os
 import time
 import mimetypes
+import hashlib
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -58,8 +61,16 @@ headers = {
     "content-type": "application/json"
 }
 
+class TranscriptionRateThrottle(UserRateThrottle):
+    rate = '100/hour'
+
+class AnonTranscriptionRateThrottle(AnonRateThrottle):
+    rate = '3/hour'
+
 class TranscriptionView(APIView):
     parser_classes = (MultiPartParser, FormParser)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [TranscriptionRateThrottle, AnonTranscriptionRateThrottle]
 
     def validate_file(self, file):
         """Validate file format and size"""
@@ -75,47 +86,78 @@ class TranscriptionView(APIView):
         if file_ext not in SUPPORTED_FORMATS:
             return False, f"Unsupported file format. Supported formats: {', '.join(SUPPORTED_FORMATS.keys())}"
 
-        return True, "File is valid"
+        # Calculate file hash for integrity
+        file_content = file.read()
+        file.seek(0)  # Reset file pointer
+        file_hash = hashlib.sha256(file_content).hexdigest()
+        
+        return True, {"message": "File is valid", "hash": file_hash}
 
     def upload_file(self, audio_file):
         def read_file(file_obj):
             content = file_obj.read()
             return content
 
-        upload_response = requests.post(
-            UPLOAD_URL,
-            headers={"authorization": ASSEMBLYAI_API_KEY},
-            data=read_file(audio_file)
-        )
-        return upload_response.json()
+        try:
+            upload_response = requests.post(
+                UPLOAD_URL,
+                headers={"authorization": ASSEMBLYAI_API_KEY},
+                data=read_file(audio_file),
+                timeout=30  # 30 seconds timeout
+            )
+            upload_response.raise_for_status()
+            return upload_response.json()
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"File upload failed: {str(e)}")
 
     def create_transcript(self, audio_url, language_code=None):
         transcript_request = {
             "audio_url": audio_url,
-            "language_detection": True,  # Enable auto language detection
+            "language_detection": True,
+            "content_safety": True,  # Enable content safety detection
+            "webhook_url": None,  # Add your webhook URL here if needed
+            "speaker_labels": True  # Enable speaker diarization
         }
 
-        # Only set specific language if requested
         if language_code:
             transcript_request["language_code"] = language_code
 
-        transcript_response = requests.post(
-            TRANSCRIPT_URL,
-            json=transcript_request,
-            headers=headers
-        )
-        return transcript_response.json()
+        try:
+            transcript_response = requests.post(
+                TRANSCRIPT_URL,
+                json=transcript_request,
+                headers=headers,
+                timeout=30
+            )
+            transcript_response.raise_for_status()
+            return transcript_response.json()
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Transcription request failed: {str(e)}")
 
     def get_transcript_result(self, transcript_id):
         polling_endpoint = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
-        while True:
-            polling_response = requests.get(polling_endpoint, headers=headers)
-            result = polling_response.json()
-            
-            if result['status'] == 'completed' or result['status'] == 'error':
-                return result
-            
-            time.sleep(3)  # Wait 3 seconds before polling again
+        max_retries = 100  # Maximum number of retries
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                polling_response = requests.get(
+                    polling_endpoint,
+                    headers=headers,
+                    timeout=30
+                )
+                polling_response.raise_for_status()
+                result = polling_response.json()
+                
+                if result['status'] == 'completed' or result['status'] == 'error':
+                    return result
+                
+                time.sleep(3)  # Wait 3 seconds before polling again
+                retry_count += 1
+            except requests.exceptions.RequestException as e:
+                raise Exception(f"Error getting transcription result: {str(e)}")
+
+        raise Exception("Transcription timed out")
 
     def post(self, request, *args, **kwargs):
         try:
@@ -128,10 +170,10 @@ class TranscriptionView(APIView):
                 )
 
             # Validate file
-            is_valid, message = self.validate_file(audio_file)
+            is_valid, validation_result = self.validate_file(audio_file)
             if not is_valid:
                 return Response(
-                    {"error": message},
+                    {"error": validation_result},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -172,14 +214,25 @@ class TranscriptionView(APIView):
             
             if result['status'] == 'completed':
                 detected_language = result.get('language_code', 'unknown')
-                return Response({
+                response_data = {
                     "text": result['text'],
                     "detected_language": SUPPORTED_LANGUAGES.get(detected_language, detected_language),
                     "detected_language_code": detected_language,
                     "requested_language": SUPPORTED_LANGUAGES.get(language_code) if language_code else "auto",
                     "audio_format": os.path.splitext(audio_file.name)[1][1:].upper(),
+                    "file_hash": validation_result["hash"],
                     "status": "completed"
-                })
+                }
+
+                # Add speaker labels if available
+                if 'speaker_labels' in result and result['speaker_labels']:
+                    response_data['speakers'] = result['speaker_labels']
+
+                # Add content safety results if available
+                if 'content_safety_labels' in result:
+                    response_data['content_safety'] = result['content_safety_labels']
+
+                return Response(response_data)
             else:
                 return Response({
                     "error": "Transcription failed",
@@ -188,6 +241,9 @@ class TranscriptionView(APIView):
 
         except Exception as e:
             return Response(
-                {"error": str(e)},
+                {
+                    "error": "Internal server error",
+                    "details": str(e)
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

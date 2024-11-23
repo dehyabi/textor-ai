@@ -3,5 +3,8 @@ from django.urls import path, include
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/', include('audio_transcribe.urls')),
+    path('api/', include([
+        path('', include('audio_transcribe.urls')),
+        path('auth/', include('api_auth.urls')),
+    ])),
 ]
