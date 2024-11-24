@@ -5,16 +5,36 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
+from rest_framework import generics
+from rest_framework.viewsets import ViewSet
+from rest_framework.decorators import action
+from api_auth.authentication import BearerTokenAuthentication
 import requests
 import os
 import time
 import mimetypes
 import hashlib
+import logging
 from dotenv import load_dotenv
+from datetime import datetime
+import pytz
+from tempfile import NamedTemporaryFile
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 ASSEMBLYAI_API_KEY = os.getenv('ASSEMBLYAI_API_KEY')
+if not ASSEMBLYAI_API_KEY:
+    raise ValueError("ASSEMBLYAI_API_KEY environment variable is not set")
+
+logger.info(f"Using AssemblyAI API Key: {ASSEMBLYAI_API_KEY}")
+
+headers = {
+    "authorization": ASSEMBLYAI_API_KEY,
+    "content-type": "application/json"
+}
+
 UPLOAD_URL = "https://api.assemblyai.com/v2/upload"
 TRANSCRIPT_URL = "https://api.assemblyai.com/v2/transcript"
 
@@ -56,88 +76,324 @@ SUPPORTED_LANGUAGES = {
     'ta': 'Tamil'
 }
 
-headers = {
-    "authorization": ASSEMBLYAI_API_KEY,
-    "content-type": "application/json"
-}
-
 class TranscriptionRateThrottle(UserRateThrottle):
     rate = '100/hour'
 
 class AnonTranscriptionRateThrottle(AnonRateThrottle):
     rate = '3/hour'
 
-class TranscriptionView(APIView):
+class TranscriptionViewSet(ViewSet):
+    """
+    ViewSet for handling audio file transcriptions
+    """
     parser_classes = (MultiPartParser, FormParser)
     permission_classes = [IsAuthenticated]
+    authentication_classes = [BearerTokenAuthentication]
     throttle_classes = [TranscriptionRateThrottle, AnonTranscriptionRateThrottle]
 
     def validate_file(self, file):
         """Validate file format and size"""
-        # Check file size
-        if file.size > MAX_FILE_SIZE:
-            return False, f"File size exceeds maximum limit of {MAX_FILE_SIZE/1024/1024}MB"
-
-        # Get file extension and mime type
-        file_name = file.name.lower()
-        file_ext = os.path.splitext(file_name)[1]
-        
-        # Check if format is supported
-        if file_ext not in SUPPORTED_FORMATS:
-            return False, f"Unsupported file format. Supported formats: {', '.join(SUPPORTED_FORMATS.keys())}"
-
-        # Calculate file hash for integrity
-        file_content = file.read()
-        file.seek(0)  # Reset file pointer
-        file_hash = hashlib.sha256(file_content).hexdigest()
-        
-        return True, {"message": "File is valid", "hash": file_hash}
-
-    def upload_file(self, audio_file):
-        def read_file(file_obj):
-            content = file_obj.read()
-            return content
-
         try:
+            logger.info(f"Validating file: {file.name}")
+            logger.info(f"File size: {file.size} bytes")
+            logger.info(f"Content type: {file.content_type}")
+
+            # Check file size (max 10MB)
+            if file.size > 10 * 1024 * 1024:  # 10MB in bytes
+                logger.error(f"File too large: {file.size} bytes")
+                return False, "File too large. Maximum size is 10MB"
+
+            # List of allowed audio formats and their MIME types
+            allowed_formats = [
+                'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/wave',
+                'audio/x-wav', 'audio/aac', 'audio/ogg', 'audio/flac',
+                'audio/x-m4a', 'audio/mp4', 'audio/x-mp3'
+            ]
+
+            if not file.content_type in allowed_formats:
+                logger.error(f"Invalid content type: {file.content_type}")
+                return False, f"Invalid file format. Supported formats: MP3, WAV, AAC, OGG, FLAC, M4A"
+
+            # Try to read a small part of the file to verify it's valid
+            try:
+                chunk = file.read(1024)
+                file.seek(0)  # Reset file pointer
+                logger.info("Successfully read file chunk")
+            except Exception as e:
+                logger.error(f"Error reading file: {str(e)}")
+                return False, "Could not read file content"
+
+            logger.info("File validation successful")
+            return True, "File is valid"
+
+        except Exception as e:
+            logger.error(f"File validation error: {str(e)}")
+            return False, f"File validation failed: {str(e)}"
+
+    def upload_file(self, file_path):
+        """Upload file to AssemblyAI"""
+        try:
+            logger.info(f"Starting file upload: {file_path}")
+            logger.info(f"Using AssemblyAI API Key: {ASSEMBLYAI_API_KEY}")
+            
+            # Verify file exists and is readable
+            if not os.path.exists(file_path):
+                raise Exception(f"File not found: {file_path}")
+            
+            # Get file size
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                raise Exception("File is empty")
+            
+            logger.info(f"File size: {file_size} bytes")
+            
+            # Read file content
+            with open(file_path, 'rb') as f:
+                file_data = f.read()
+            
+            # Upload file directly
+            logger.info("Uploading file to AssemblyAI")
             upload_response = requests.post(
                 UPLOAD_URL,
                 headers={"authorization": ASSEMBLYAI_API_KEY},
-                data=read_file(audio_file),
-                timeout=30  # 30 seconds timeout
+                data=file_data
             )
-            upload_response.raise_for_status()
-            return upload_response.json()
+            
+            logger.info(f"Upload response status: {upload_response.status_code}")
+            logger.info(f"Upload response: {upload_response.text}")
+            
+            if upload_response.status_code != 200:
+                logger.error(f"Upload failed. Status: {upload_response.status_code}")
+                logger.error(f"Response: {upload_response.text}")
+                raise Exception(f"Upload failed: {upload_response.text}")
+            
+            return upload_response.json()["upload_url"]
+                
+        except requests.exceptions.SSLError as e:
+            logger.error(f"SSL Error during upload: {str(e)}")
+            raise Exception(f"SSL Error during upload: {str(e)}")
         except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response text: {e.response.text}")
+            raise Exception(f"Upload request failed: {str(e)}")
+        except Exception as e:
+            logger.error(f"Upload failed: {str(e)}")
             raise Exception(f"File upload failed: {str(e)}")
+        finally:
+            # Clean up temp file if it exists
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.info(f"Cleaned up temporary file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp file: {str(e)}")
 
-    def create_transcript(self, audio_url, language_code=None):
-        transcript_request = {
-            "audio_url": audio_url,
-            "language_detection": True,
-            "content_safety": True,  # Enable content safety detection
-            "webhook_url": None,  # Add your webhook URL here if needed
-            "speaker_labels": True  # Enable speaker diarization
-        }
-
-        if language_code:
-            transcript_request["language_code"] = language_code
-
+    def cleanup_stuck_transcripts(self):
+        """Clean up stuck transcripts"""
         try:
+            # Get list of transcripts
+            response = requests.get(
+                "https://api.assemblyai.com/v2/transcript",
+                headers=headers,
+                params={"limit": 10},
+                timeout=30
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            # Find stuck transcripts (processing for more than 10 minutes)
+            for transcript in data.get('transcripts', []):
+                if transcript['status'] == 'processing':
+                    created_time = datetime.fromisoformat(transcript['created'].replace('Z', '+00:00'))
+                    if (datetime.now(pytz.utc) - created_time).total_seconds() > 600:  # 10 minutes
+                        # Delete stuck transcript
+                        logger.info(f"Deleting stuck transcript {transcript['id']}")
+                        requests.delete(
+                            f"https://api.assemblyai.com/v2/transcript/{transcript['id']}",
+                            headers=headers
+                        )
+        except Exception as e:
+            logger.error(f"Error cleaning up transcripts: {str(e)}")
+
+    def create_transcript(self, audio_url, language_code=None, auto_detect=False):
+        """Create transcription request with optional language detection"""
+        try:
+            # Clean up stuck transcripts first
+            self.cleanup_stuck_transcripts()
+            
+            # Map of supported languages - Updated to match AssemblyAI's supported languages
+            LANGUAGE_CODES = {
+                'en': 'en',      # English (Global)
+                'en_us': 'en',   # English (US)
+                'en_uk': 'en',   # English (UK)
+                'en_au': 'en',   # English (Australia)
+                'fr': 'fr',      # French
+                'de': 'de',      # German
+                'it': 'it',      # Italian
+                'pt': 'pt',      # Portuguese
+                'nl': 'nl',      # Dutch
+                'hi': 'hi',      # Hindi
+                'ja': 'ja',      # Japanese
+                'es': 'es',      # Spanish
+                'ko': 'ko',      # Korean
+                'pl': 'pl',      # Polish
+                'id': 'id',      # Indonesian
+                'ta': 'ta',      # Tamil
+                'te': 'te',      # Telugu
+                'tr': 'tr',      # Turkish
+                'ru': 'ru',      # Russian
+                'vi': 'vi',      # Vietnamese
+                'zh': 'zh',      # Chinese (Simplified)
+                'zh_tw': 'zh',   # Chinese (Traditional)
+                'da': 'da',      # Danish
+                'fil': 'fil',    # Filipino
+                'fi': 'fi',      # Finnish
+                'el': 'el',      # Greek
+                'hu': 'hu',      # Hungarian
+                'ml': 'ml',      # Malayalam
+                'no': 'no',      # Norwegian
+                'sv': 'sv',      # Swedish
+                'th': 'th',      # Thai
+                'uk': 'uk',      # Ukrainian
+                'bn': 'bn',      # Bengali
+                'ro': 'ro',      # Romanian
+                'si': 'si',      # Sinhala
+                'mr': 'mr',      # Marathi
+                'gu': 'gu',      # Gujarati
+                'kn': 'kn',      # Kannada
+                'ar': 'ar',      # Arabic
+                'fa': 'fa',      # Persian
+                'ur': 'ur',      # Urdu
+                'hr': 'hr',      # Croatian
+                'bg': 'bg',      # Bulgarian
+                'sr': 'sr',      # Serbian
+                'sk': 'sk',      # Slovak
+                'sl': 'sl',      # Slovenian
+                'ca': 'ca',      # Catalan
+                'he': 'he',      # Hebrew
+                'lv': 'lv',      # Latvian
+                'lt': 'lt',      # Lithuanian
+                'ne': 'ne',      # Nepali
+                'et': 'et',      # Estonian
+                'ms': 'ms',      # Malay
+                'tl': 'tl',      # Tagalog
+                'pa': 'pa',      # Punjabi
+                'sw': 'sw',      # Swahili
+                'az': 'az',      # Azerbaijani
+                'hy': 'hy',      # Armenian
+                'bs': 'bs',      # Bosnian
+                'my': 'my',      # Burmese
+                'af': 'af',      # Afrikaans
+                'ka': 'ka',      # Georgian
+                'is': 'is',      # Icelandic
+                'km': 'km',      # Khmer
+                'lo': 'lo',      # Lao
+                'mk': 'mk',      # Macedonian
+                'mn': 'mn',      # Mongolian
+                'gl': 'gl',      # Galician
+                'kk': 'kk',      # Kazakh
+            }
+            
+            # Basic request with required fields
+            transcript_request = {
+                "audio_url": audio_url,
+            }
+
+            # Handle language detection and language code
+            if auto_detect:
+                logger.info("Using automatic language detection")
+                transcript_request["language_detection"] = True
+            elif language_code:
+                # Convert to lowercase and remove any region specifier
+                base_lang = language_code.lower().split('_')[0]
+                # Get the simplified language code
+                normalized_lang = LANGUAGE_CODES.get(base_lang) or LANGUAGE_CODES.get(language_code.lower())
+                if not normalized_lang:
+                    logger.warning(f"Unsupported language code: {language_code}, defaulting to English")
+                    normalized_lang = 'en'
+                logger.info(f"Using language code: {normalized_lang}")
+                transcript_request["language_code"] = normalized_lang
+            else:
+                # Default to automatic language detection if no language specified
+                logger.info("No language specified, using automatic language detection")
+                transcript_request["language_detection"] = True
+            
+            # Optional parameters based on language support
+            if not language_code or language_code.startswith('en'):
+                # Full features for English or auto-detected language
+                transcript_request.update({
+                    "punctuate": True,
+                    "format_text": True,
+                    "auto_highlights": True,
+                    "speaker_labels": True,
+                    "auto_chapters": True,
+                    "entity_detection": True,
+                    "iab_categories": True
+                })
+            else:
+                # Basic features for non-English
+                transcript_request.update({
+                    "punctuate": True,
+                    "format_text": True
+                })
+            
+            logger.info(f"Creating transcript request for URL: {audio_url}")
+            logger.info(f"Request payload: {transcript_request}")
+            logger.info(f"Using headers: {headers}")
+            
+            # Create transcription request without verifying SSL for AssemblyAI CDN
             transcript_response = requests.post(
                 TRANSCRIPT_URL,
                 json=transcript_request,
                 headers=headers,
-                timeout=30
+                timeout=30,
+                verify=False  # Disable SSL verification for AssemblyAI CDN
             )
-            transcript_response.raise_for_status()
-            return transcript_response.json()
+            
+            # Log response details
+            logger.info(f"Transcript request response status: {transcript_response.status_code}")
+            logger.info(f"Transcript request content: {transcript_response.text}")
+            
+            if transcript_response.status_code != 200:
+                error_detail = transcript_response.json() if transcript_response.text else "No error details provided"
+                logger.error(f"AssemblyAI API error: {error_detail}")
+                raise Exception(f"AssemblyAI API error: {error_detail}")
+            
+            response_data = transcript_response.json()
+            
+            if 'id' in response_data:
+                logger.info(f"Transcript request created. ID: {response_data['id']}")
+                return response_data
+            else:
+                logger.error(f"Transcript ID not found in response: {response_data}")
+                raise Exception("No transcript ID in response")
+            
         except requests.exceptions.RequestException as e:
-            raise Exception(f"Transcription request failed: {str(e)}")
+            logger.error(f"Request failed: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response text: {e.response.text}")
+                try:
+                    error_json = e.response.json()
+                    logger.error(f"Error details: {error_json}")
+                    raise Exception(f"AssemblyAI API error: {error_json}")
+                except ValueError:
+                    logger.error(f"Raw error text: {e.response.text}")
+                    raise Exception(f"AssemblyAI API error: {e.response.text}")
+            raise Exception(f"Request failed: {str(e)}")
+        except Exception as e:
+            logger.error(f"Transcription request failed: {str(e)}")
+            raise
 
     def get_transcript_result(self, transcript_id):
+        """Get transcription result with progress updates"""
         polling_endpoint = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
-        max_retries = 100  # Maximum number of retries
+        max_retries = 600  # Increased to 15 minutes total (1.5s * 600)
         retry_count = 0
+        last_status = None
+        last_progress = None
 
         while retry_count < max_retries:
             try:
@@ -149,101 +405,180 @@ class TranscriptionView(APIView):
                 polling_response.raise_for_status()
                 result = polling_response.json()
                 
-                if result['status'] == 'completed' or result['status'] == 'error':
-                    return result
+                logger.info(f"Polling response for {transcript_id}: {result}")
                 
-                time.sleep(3)  # Wait 3 seconds before polling again
+                current_status = result.get('status')
+                current_progress = result.get('percentage', 0)
+                
+                # Return any status change immediately
+                if current_status != last_status or current_progress != last_progress:
+                    logger.info(f"Transcript {transcript_id} - Status: {current_status}, Progress: {current_progress}%")
+                    last_status = current_status
+                    last_progress = current_progress
+                    
+                    # Build response based on status
+                    response = {
+                        'status': current_status,
+                        'progress': current_progress,
+                        'text': result.get('text'),  
+                        'error': result.get('error'),
+                        'language_code': result.get('language_code'),
+                        'audio_duration': result.get('audio_duration'),
+                        'punctuate': result.get('punctuate', True),
+                        'format_text': result.get('format_text', True),
+                        'confidence': result.get('confidence'),
+                        'words': result.get('words'),
+                        'utterances': result.get('utterances'),
+                        'chapters': result.get('chapters'),
+                        'highlights': result.get('auto_highlights_result')
+                    }
+                    
+                    # Add status message for clarity
+                    if current_status == 'queued':
+                        response['message'] = 'Your audio is queued for processing'
+                    elif current_status == 'processing':
+                        response['message'] = f'Processing your audio: {current_progress}% complete'
+                    elif current_status == 'completed':
+                        if not response['text']:
+                            response['message'] = 'Warning: Transcription completed but no text was generated'
+                            logger.warning(f"Completed transcription {transcript_id} has no text: {result}")
+                        else:
+                            response['message'] = 'Transcription completed successfully'
+                    elif current_status == 'error':
+                        response['message'] = f'Error during transcription: {result.get("error")}'
+                    
+                    # Remove None values
+                    response = {k: v for k, v in response.items() if v is not None}
+                    
+                    return response
+                
+                if current_status == 'completed':
+                    break
+                
+                time.sleep(1.5)
                 retry_count += 1
+                
             except requests.exceptions.RequestException as e:
-                raise Exception(f"Error getting transcription result: {str(e)}")
-
-        raise Exception("Transcription timed out")
-
-    def post(self, request, *args, **kwargs):
-        try:
-            # Get audio file
-            audio_file = request.FILES.get('audio_file')
-            if not audio_file:
-                return Response(
-                    {"error": "No audio file provided"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Validate file
-            is_valid, validation_result = self.validate_file(audio_file)
-            if not is_valid:
-                return Response(
-                    {"error": validation_result},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Get language code (optional)
-            language_code = request.data.get('language_code')
-            if language_code and language_code not in SUPPORTED_LANGUAGES:
-                return Response(
-                    {
-                        "error": "Invalid language code",
-                        "supported_languages": SUPPORTED_LANGUAGES
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Upload the file
-            upload_response = self.upload_file(audio_file)
-            if 'upload_url' not in upload_response:
-                return Response({
-                    "error": "File upload failed",
-                    "details": upload_response.get('error', 'Unknown error')
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-            audio_url = upload_response['upload_url']
-
-            # Request transcript with or without specific language
-            transcript_response = self.create_transcript(audio_url, language_code)
-            
-            if 'error' in transcript_response:
-                return Response({
-                    "error": "Transcription request failed",
-                    "details": transcript_response.get('error', 'Unknown error')
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-            transcript_id = transcript_response['id']
-
-            # Get transcription result
-            result = self.get_transcript_result(transcript_id)
-            
-            if result['status'] == 'completed':
-                detected_language = result.get('language_code', 'unknown')
-                response_data = {
-                    "text": result['text'],
-                    "detected_language": SUPPORTED_LANGUAGES.get(detected_language, detected_language),
-                    "detected_language_code": detected_language,
-                    "requested_language": SUPPORTED_LANGUAGES.get(language_code) if language_code else "auto",
-                    "audio_format": os.path.splitext(audio_file.name)[1][1:].upper(),
-                    "file_hash": validation_result["hash"],
-                    "status": "completed"
+                logger.error(f"Error polling transcript {transcript_id}: {str(e)}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logger.error(f"API Response: {e.response.text}")
+                return {
+                    'status': 'error',
+                    'error': str(e),
+                    'progress': 0,
+                    'message': f'Error checking transcription status: {str(e)}'
                 }
 
-                # Add speaker labels if available
-                if 'speaker_labels' in result and result['speaker_labels']:
-                    response_data['speakers'] = result['speaker_labels']
+        logger.error(f"Transcription timed out after {max_retries} attempts")
+        return {
+            'status': 'error',
+            'error': 'Transcription timed out',
+            'progress': last_progress or 0,
+            'message': 'Transcription timed out after 15 minutes'
+        }
 
-                # Add content safety results if available
-                if 'content_safety_labels' in result:
-                    response_data['content_safety'] = result['content_safety_labels']
+    def list(self, request):
+        """List all transcriptions"""
+        return Response({"message": "Use POST /upload/ to start a transcription"})
 
-                return Response(response_data)
-            else:
+    def retrieve(self, request, pk=None):
+        """Get transcription status or result"""
+        try:
+            if not pk:
                 return Response({
-                    "error": "Transcription failed",
-                    "details": result.get('error', 'Unknown error')
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                    "error": "Transcript ID is required"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            result = self.get_transcript_result(pk)
+            return Response(result)
 
         except Exception as e:
+            logger.error(f"Error getting transcript {pk}: {str(e)}")
+            return Response({
+                "error": "Failed to get transcript",
+                "details": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['post'])
+    def upload(self, request):
+        """Upload audio file and start transcription"""
+        temp_file = None
+        try:
+            # Validate request
+            if 'file' not in request.FILES:
+                return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+            file = request.FILES['file']
+            language_code = request.data.get('language_code')
+            auto_detect = request.data.get('auto_detect', 'false').lower() == 'true'
+
+            # Log request details
+            logger.info(f"Processing file upload: {file.name}")
+            logger.info(f"Language code: {language_code}")
+            logger.info(f"Auto detect: {auto_detect}")
+
+            # Validate file size (10MB limit)
+            if file.size > 10 * 1024 * 1024:  # 10MB in bytes
+                return Response(
+                    {'error': 'File size exceeds 10MB limit'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Validate file type
+            content_type = file.content_type.lower()
+            if not any(type in content_type for type in ['audio', 'video', 'application/octet-stream']):
+                return Response(
+                    {'error': 'Invalid file type. Please upload an audio file'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Create temporary directory if it doesn't exist
+            temp_dir = '/tmp/assemblyai_uploads'
+            os.makedirs(temp_dir, exist_ok=True)
+
+            # Create temporary file with original extension
+            file_extension = os.path.splitext(file.name)[1] or '.tmp'
+            temp_file = os.path.join(temp_dir, f"upload_{int(time.time())}{file_extension}")
+            
+            logger.info(f"Creating temporary file: {temp_file}")
+            
+            # Write file in binary mode
+            with open(temp_file, 'wb') as f:
+                for chunk in file.chunks():
+                    f.write(chunk)
+
+            try:
+                # Upload to AssemblyAI
+                logger.info("Uploading file to AssemblyAI")
+                upload_url = self.upload_file(temp_file)
+                logger.info(f"File uploaded successfully. URL: {upload_url}")
+
+                # Create transcription request
+                logger.info("Creating transcription request")
+                transcript = self.create_transcript(upload_url, language_code, auto_detect)
+                logger.info(f"Transcription request created: {transcript}")
+
+                return Response({
+                    'message': 'File uploaded and transcription started',
+                    'transcript_id': transcript['id'],
+                    'status': 'processing'
+                }, status=status.HTTP_202_ACCEPTED)
+
+            finally:
+                # Clean up temporary file
+                if temp_file and os.path.exists(temp_file):
+                    logger.info(f"Cleaning up temporary file: {temp_file}")
+                    os.unlink(temp_file)
+
+        except Exception as e:
+            logger.error(f"Error processing upload: {str(e)}")
+            # Clean up temporary file in case of error
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.unlink(temp_file)
+                except Exception as cleanup_error:
+                    logger.error(f"Error cleaning up temporary file: {cleanup_error}")
             return Response(
-                {
-                    "error": "Internal server error",
-                    "details": str(e)
-                },
+                {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
