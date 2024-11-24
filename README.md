@@ -365,32 +365,175 @@ curl https://your-app-name.herokuapp.com/health/
 heroku ps:metrics --json
 ```
 
+### PythonAnywhere Deployment
+
+### Prerequisites
+- A PythonAnywhere account ([Sign up here](https://www.pythonanywhere.com/))
+- Git repository with your code
+- AssemblyAI API key
+
+### Deployment Steps
+
+1. Log in to PythonAnywhere and open a Bash console.
+
+2. Clone your repository:
+```bash
+git clone https://github.com/yourusername/textor-ai.git
+cd textor-ai
+```
+
+3. Create and activate a virtual environment:
+```bash
+mkvirtualenv --python=/usr/bin/python3.10 textor-ai
+workon textor-ai
+```
+
+4. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+5. Create a new web app:
+   - Go to the Web tab
+   - Click "Add a new web app"
+   - Choose "Manual configuration"
+   - Select Python 3.10
+   - Note your domain name (e.g., yourusername.pythonanywhere.com)
+
+6. Configure the virtual environment:
+   - In the Web tab, under "Virtualenv:"
+   - Enter: `/home/yourusername/.virtualenvs/textor-ai`
+
+7. Configure WSGI file:
+   - Click on the WSGI configuration file link
+   - Delete everything
+   - Copy content from `pythonanywhere_wsgi.py`
+   - Update `path` variable with your username
+   - Save the file
+
+8. Set up static files:
+   - In the Web tab, add:
+     ```
+     URL: /static/
+     Directory: /home/yourusername/textor-ai/staticfiles
+     ```
+
+9. Create and configure environment variables:
+   - Go to the Web tab
+   - Under "Environment variables", add:
+     ```
+     DJANGO_SECRET_KEY=your-secret-key
+     DJANGO_DEBUG=False
+     DJANGO_ALLOWED_HOSTS=yourusername.pythonanywhere.com
+     ASSEMBLYAI_API_KEY=your-assemblyai-api-key
+     ```
+
+10. Set up the database:
+    ```bash
+    # In PythonAnywhere console
+    python manage.py migrate
+    python manage.py createsuperuser
+    ```
+
+11. Collect static files:
+    ```bash
+    python manage.py collectstatic --noinput
+    ```
+
+12. Configure CORS:
+    - Add your domain to `ALLOWED_HOSTS` in settings.py
+    - Add your frontend domain to `CORS_ALLOWED_ORIGINS` if needed
+
+13. Reload the web app:
+    - Go to the Web tab
+    - Click the "Reload" button
+
+### File Permissions
+
+Make sure files have correct permissions:
+```bash
+chmod 755 /home/yourusername/textor-ai
+chmod 755 /home/yourusername/textor-ai/be
+chmod 644 /home/yourusername/textor-ai/be/db.sqlite3
+```
+
+### Database Setup
+
+PythonAnywhere provides MySQL by default. To use it:
+
+1. Go to the Databases tab
+2. Initialize MySQL and set a password
+3. Create a new database:
+```sql
+CREATE DATABASE textor_ai CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+4. Update your environment variables with the database URL:
+```
+DATABASE_URL=mysql://yourusername:password@yourusername.mysql.pythonanywhere-services.com/textor_ai
+```
+
+### Scheduled Tasks
+
+Set up database backups:
+1. Go to the Tasks tab
+2. Add a daily task:
+```bash
+mysqldump -u yourusername -p'password' textor_ai > /home/yourusername/backups/textor_ai_$(date +%Y%m%d).sql
+```
+
+### SSL/HTTPS
+
+For SSL (PythonAnywhere Business accounts):
+1. Go to the Web tab
+2. Enable "Force HTTPS"
+3. Update your ALLOWED_HOSTS and CORS settings accordingly
+
 ### Troubleshooting
 
-1. If static files are not serving:
+1. Check error logs:
+   - Go to the Web tab
+   - Click "Error log" link
+
+2. Check access logs:
+   - Go to the Web tab
+   - Click "Access log" link
+
+3. Common issues:
+   - **Static files not loading**: Check paths in Web tab
+   - **502 Bad Gateway**: Check error logs and WSGI file
+   - **Database errors**: Check database URL and migrations
+   - **Import errors**: Check virtual environment and requirements
+
+4. Reload after changes:
+   - Always click "Reload" in Web tab after making changes
+   - Some changes require server restart
+
+### Updating the Application
+
+1. Pull latest changes:
 ```bash
-heroku run python manage.py collectstatic --noinput
+cd ~/textor-ai
+git pull origin main
 ```
 
-2. If database migrations fail:
+2. Update dependencies:
 ```bash
-heroku run python manage.py migrate --noinput
+workon textor-ai
+pip install -r requirements.txt
 ```
 
-3. To restart the application:
+3. Run migrations:
 ```bash
-heroku restart
+python manage.py migrate
 ```
 
-4. To check application status:
+4. Collect static files:
 ```bash
-heroku ps
+python manage.py collectstatic --noinput
 ```
 
-5. To view recent logs:
-```bash
-heroku logs --tail
-```
+5. Reload the web app in the Web tab
 
 ### Production Checklist
 
