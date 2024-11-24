@@ -1,16 +1,18 @@
-# AssemblyAI Speech-to-Text API
+# Textor-AI
 
-A Django REST API wrapper for AssemblyAI's transcription service that provides multi-language audio transcription capabilities with advanced features.
+A powerful Speech-to-Text API built with Django REST Framework and AssemblyAI. Textor-AI provides enterprise-grade transcription capabilities with advanced features like multi-language support, real-time status tracking, and comprehensive transcription management.
 
 ## Features
 
-- Multi-language transcription support with auto-detection
-- Token-based authentication
-- File upload with size validation (10MB limit)
-- Real-time transcription status tracking
-- Support for various audio formats (MP3, WAV, M4A, etc.)
-- Dashboard-like status tracking (Queued, Processing, Completed, Error)
-- Automatic sync with AssemblyAI
+- 🎯 High-accuracy speech-to-text conversion
+- 🌍 Multi-language transcription support
+- 📊 Real-time transcription status tracking
+- 🔄 Automatic synchronization with AssemblyAI
+- 🔐 Secure token-based authentication
+- 📱 RESTful API with comprehensive documentation
+- 📂 Support for multiple audio formats
+- 📋 Grouped transcription listing with pagination
+- ⚡ Rate limiting and error handling
 
 ## Setup
 
@@ -74,10 +76,13 @@ Authorization: Bearer your_token_here
 - **Method:** `POST`
 - **Authentication:** Required
 - **Content-Type:** `multipart/form-data`
+- **Constraints:**
+  - Maximum file size: 5MB
+  - Supported formats: MP3, WAV, M4A, AAC, OGG, FLAC
 - **Parameters:**
-  - `file`: Audio file (required, max 10MB)
+  - `file`: Audio file (required)
   - `language_code`: ISO language code (optional)
-  - `auto_detect`: Boolean for auto language detection (optional, default: true)
+  - `auto_detect`: Boolean to enable language auto-detection (optional, default: true)
 - **Example:**
 ```bash
 curl -X POST \
@@ -95,23 +100,21 @@ curl -X POST \
 }
 ```
 
-### 2. List All Transcriptions
-- **URL:** `/api/transcribe/`
-- **Method:** `GET`
-- **Authentication:** Required
-- **Description:** Returns all transcriptions with status counts and grouping
-- **Pagination Parameters:**
-  - `page`: Page number (default: 1)
-  - `page_size`: Number of items per page (default: 10, max: 100)
-- **Example without pagination:**
+### 2. List Transcriptions
+
+**Endpoint:** `GET /api/transcribe/`
+
+List all transcriptions for the authenticated user, grouped by status. Results are paginated.
+
+**Parameters:**
+- `page`: Page number (default: 1)
+- `page_size`: Number of items per page (default: 10, max: 100)
+
+**Example Request:**
 ```bash
-curl -H "Authorization: Bearer your_token" \
-  http://localhost:8000/api/transcribe/
-```
-- **Example with pagination:**
-```bash
-curl -H "Authorization: Bearer your_token" \
-  http://localhost:8000/api/transcribe/?page=1&page_size=10
+curl -X GET \
+  'http://localhost:8000/api/transcribe/?page=1&page_size=10' \
+  -H 'Authorization: Bearer YOUR_TOKEN'
 ```
 - **Response:**
 ```json
@@ -197,14 +200,14 @@ curl -H "Authorization: Bearer your_token" \
 ```
 
 ### 4. Get All Transcriptions (Flat List)
-- **URL:** `/api/transcribe/all/`
+- **URL:** `/api/transcribe/`
 - **Method:** `GET`
 - **Authentication:** Required
 - **Description:** Returns all transcriptions in a single flat list, sorted by creation date (newest first)
 - **Example:**
 ```bash
 curl -H "Authorization: Bearer your_token" \
-  http://localhost:8000/api/transcribe/all/
+  http://localhost:8000/api/transcribe/
 ```
 - **Response:**
 ```json
@@ -237,6 +240,35 @@ curl -H "Authorization: Bearer your_token" \
 }
 ```
 
+## Rate Limiting
+
+The API implements rate limiting to ensure fair usage:
+
+- **Authenticated Users:**
+  - 25 requests per day
+  - Resets at midnight UTC
+  - Applies to all API endpoints
+  - Rate limit headers included in response
+
+- **Anonymous Users:**
+  - 3 requests per day
+  - Resets at midnight UTC
+  - Access severely limited
+
+**Rate Limit Response Headers:**
+```
+X-RateLimit-Limit: 25
+X-RateLimit-Remaining: 24
+X-RateLimit-Reset: 1706745600
+```
+
+When rate limit is exceeded, the API returns:
+```json
+{
+    "detail": "Request limit exceeded. Please try again tomorrow."
+}
+```
+
 ## Status Definitions
 
 - **Queued**: The file has been uploaded and is waiting to be processed
@@ -264,7 +296,7 @@ Error responses include detailed messages:
 
 ## File Requirements
 
-- Maximum file size: 10MB
+- Maximum file size: 5MB
 - Supported formats: MP3, WAV, M4A, and other common audio formats
 - Clear audio quality recommended for best results
 

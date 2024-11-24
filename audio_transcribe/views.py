@@ -58,8 +58,8 @@ SUPPORTED_FORMATS = {
     '.webm': 'video/webm'
 }
 
-# Maximum file size (10MB)
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB in bytes
+# Maximum file size (5MB)
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB in bytes
 
 # Supported languages by AssemblyAI
 SUPPORTED_LANGUAGES = {
@@ -79,10 +79,18 @@ SUPPORTED_LANGUAGES = {
 }
 
 class TranscriptionRateThrottle(UserRateThrottle):
-    rate = '100/hour'
+    """
+    Rate limiting for authenticated users:
+    - 25 requests per day
+    """
+    rate = '25/day'
 
 class AnonTranscriptionRateThrottle(AnonRateThrottle):
-    rate = '3/hour'
+    """
+    Rate limiting for anonymous users:
+    - 3 requests per day
+    """
+    rate = '3/day'
 
 class TranscriptionPagination(PageNumberPagination):
     page_size = 10
@@ -121,10 +129,10 @@ class TranscriptionViewSet(ViewSet):
             logger.info(f"File size: {file.size} bytes")
             logger.info(f"Content type: {file.content_type}")
 
-            # Check file size (max 10MB)
-            if file.size > 10 * 1024 * 1024:  # 10MB in bytes
+            # Check file size (5MB limit)
+            if file.size > 5 * 1024 * 1024:  # 5MB in bytes
                 logger.error(f"File too large: {file.size} bytes")
-                return False, "File too large. Maximum size is 10MB"
+                return False, "File too large. Maximum size is 5MB"
 
             # List of allowed audio formats and their MIME types
             allowed_formats = [
@@ -620,9 +628,9 @@ class TranscriptionViewSet(ViewSet):
             language_code = request.POST.get('language_code', '')
             auto_detect = request.POST.get('auto_detect', 'true').lower() == 'true'
 
-            # Validate file size (10MB limit)
-            if file.size > 10 * 1024 * 1024:
-                return Response({'error': 'File size exceeds 10MB limit'}, status=status.HTTP_400_BAD_REQUEST)
+            # Validate file size (5MB limit)
+            if file.size > 5 * 1024 * 1024:
+                return Response({'error': 'File size exceeds 5MB limit'}, status=status.HTTP_400_BAD_REQUEST)
 
             # Create temp file
             temp_file = NamedTemporaryFile(delete=False)
