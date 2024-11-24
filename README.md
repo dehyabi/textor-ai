@@ -285,4 +285,18 @@ python3 manage.py test
 
 ## License
 
-[Your License Here]
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+The MIT License is a permissive license that is short and to the point. It lets people do anything they want with your code as long as they provide attribution back to you and don't hold you liable.
+
+### Key Points:
+- ✓ Commercial use
+- ✓ Modification
+- ✓ Distribution
+- ✓ Private use
+- ✓ Liability limitations
+- ✓ Warranty limitations
+
+### Requirements:
+- License and copyright notice must be included with the code
+- The same license must be used for derivatives
