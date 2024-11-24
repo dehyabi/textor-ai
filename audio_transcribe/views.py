@@ -8,7 +8,9 @@ from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
 from rest_framework import generics
 from rest_framework.viewsets import ViewSet
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from api_auth.authentication import BearerTokenAuthentication
+from .models import Transcription
 import requests
 import os
 import time
@@ -82,6 +84,26 @@ class TranscriptionRateThrottle(UserRateThrottle):
 class AnonTranscriptionRateThrottle(AnonRateThrottle):
     rate = '3/hour'
 
+class TranscriptionPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+    def get_paginated_response(self, data):
+        return Response({
+            'count': self.page.paginator.count,
+            'next': self.get_next_link(),
+            'previous': self.get_previous_link(),
+            'current_page': self.page.number,
+            'total_pages': self.page.paginator.num_pages,
+            'total_count': len(data.get('transcriptions', {}).get('queued', [])) +
+                         len(data.get('transcriptions', {}).get('processing', [])) +
+                         len(data.get('transcriptions', {}).get('completed', [])) +
+                         len(data.get('transcriptions', {}).get('error', [])),
+            'status_counts': data.get('status_counts', {}),
+            'transcriptions': data.get('transcriptions', {})
+        })
+
 class TranscriptionViewSet(ViewSet):
     """
     ViewSet for handling audio file transcriptions
@@ -90,6 +112,7 @@ class TranscriptionViewSet(ViewSet):
     permission_classes = [IsAuthenticated]
     authentication_classes = [BearerTokenAuthentication]
     throttle_classes = [TranscriptionRateThrottle, AnonTranscriptionRateThrottle]
+    pagination_class = TranscriptionPagination
 
     def validate_file(self, file):
         """Validate file format and size"""
@@ -477,27 +500,112 @@ class TranscriptionViewSet(ViewSet):
             'message': 'Transcription timed out after 15 minutes'
         }
 
-    def list(self, request):
-        """List all transcriptions"""
-        return Response({"message": "Use POST /upload/ to start a transcription"})
-
-    def retrieve(self, request, pk=None):
-        """Get transcription status or result"""
+    def sync_with_assemblyai(self):
+        """Sync transcription data with AssemblyAI"""
         try:
-            if not pk:
-                return Response({
-                    "error": "Transcript ID is required"
-                }, status=status.HTTP_400_BAD_REQUEST)
+            # Get list of transcripts from AssemblyAI
+            response = requests.get(
+                TRANSCRIPT_URL,
+                headers=headers,
+                timeout=30
+            )
+            response.raise_for_status()
+            data = response.json()
 
-            result = self.get_transcript_result(pk)
-            return Response(result)
+            logger.info(f"Found {len(data.get('transcripts', []))} transcripts from AssemblyAI")
 
+            # Process each transcript
+            for transcript in data.get('transcripts', []):
+                transcript_id = transcript.get('id')
+                if not transcript_id:
+                    continue
+
+                # Get detailed transcript data
+                result = self.get_transcript_result(transcript_id)
+                status = result.get('status', 'unknown')
+                
+                # Get or create transcription record
+                transcription, created = Transcription.objects.get_or_create(
+                    transcript_id=transcript_id,
+                    defaults={
+                        'user': self.request.user,
+                        'status': status,
+                        'audio_url': transcript.get('audio_url', ''),
+                        'language_code': transcript.get('language', 'en')
+                    }
+                )
+
+                # Update record
+                transcription.status = status
+                transcription.text = result.get('text')
+                if status == 'completed':
+                    transcription.completed_at = datetime.now(pytz.utc)
+                if result.get('error'):
+                    transcription.error = result.get('error')
+                    transcription.status = 'error'
+                transcription.save()
+
+                if created:
+                    logger.info(f"Created new transcription record for {transcript_id}")
+                else:
+                    logger.info(f"Updated transcription {transcript_id}")
+
+            return True
         except Exception as e:
-            logger.error(f"Error getting transcript {pk}: {str(e)}")
-            return Response({
-                "error": "Failed to get transcript",
-                "details": str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error(f"Error syncing with AssemblyAI: {str(e)}")
+            return False
+
+    def get_paginated_transcriptions(self, transcriptions):
+        """Helper method to paginate and group transcriptions"""
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(transcriptions, self.request)
+
+        # Initialize status groups for paginated results
+        grouped_transcriptions = {
+            'queued': [],
+            'processing': [],
+            'completed': [],
+            'error': []
+        }
+
+        # Group paginated transcriptions by status
+        for trans in page:
+            trans_data = {
+                'id': trans.transcript_id,
+                'text': trans.text,
+                'audio_url': trans.audio_url,
+                'language_code': trans.language_code,
+                'created_at': trans.created_at.isoformat() if trans.created_at else None,
+                'completed_at': trans.completed_at.isoformat() if trans.completed_at else None,
+                'error': trans.error,
+                'status': trans.status
+            }
+
+            if trans.status == 'queued':
+                grouped_transcriptions['queued'].append(trans_data)
+            elif trans.status == 'processing':
+                grouped_transcriptions['processing'].append(trans_data)
+            elif trans.status == 'completed':
+                grouped_transcriptions['completed'].append(trans_data)
+            elif trans.status == 'error':
+                grouped_transcriptions['error'].append(trans_data)
+            else:
+                logger.warning(f"Unknown status {trans.status} for transcription {trans.transcript_id}")
+
+        # Calculate status counts for the current page
+        status_counts = {
+            'queued': len(grouped_transcriptions['queued']),
+            'processing': len(grouped_transcriptions['processing']),
+            'completed': len(grouped_transcriptions['completed']),
+            'error': len(grouped_transcriptions['error'])
+        }
+
+        response_data = {
+            'status_counts': status_counts,
+            'transcriptions': grouped_transcriptions
+        }
+
+        return paginator.get_paginated_response(response_data)
 
     @action(detail=False, methods=['post'])
     def upload(self, request):
@@ -509,76 +617,114 @@ class TranscriptionViewSet(ViewSet):
                 return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
 
             file = request.FILES['file']
-            language_code = request.data.get('language_code')
-            auto_detect = request.data.get('auto_detect', 'false').lower() == 'true'
-
-            # Log request details
-            logger.info(f"Processing file upload: {file.name}")
-            logger.info(f"Language code: {language_code}")
-            logger.info(f"Auto detect: {auto_detect}")
+            language_code = request.POST.get('language_code', '')
+            auto_detect = request.POST.get('auto_detect', 'true').lower() == 'true'
 
             # Validate file size (10MB limit)
-            if file.size > 10 * 1024 * 1024:  # 10MB in bytes
-                return Response(
-                    {'error': 'File size exceeds 10MB limit'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            if file.size > 10 * 1024 * 1024:
+                return Response({'error': 'File size exceeds 10MB limit'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Validate file type
-            content_type = file.content_type.lower()
-            if not any(type in content_type for type in ['audio', 'video', 'application/octet-stream']):
-                return Response(
-                    {'error': 'Invalid file type. Please upload an audio file'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            # Create temp file
+            temp_file = NamedTemporaryFile(delete=False)
+            for chunk in file.chunks():
+                temp_file.write(chunk)
+            temp_file.close()
 
-            # Create temporary directory if it doesn't exist
-            temp_dir = '/tmp/assemblyai_uploads'
-            os.makedirs(temp_dir, exist_ok=True)
-
-            # Create temporary file with original extension
-            file_extension = os.path.splitext(file.name)[1] or '.tmp'
-            temp_file = os.path.join(temp_dir, f"upload_{int(time.time())}{file_extension}")
-            
-            logger.info(f"Creating temporary file: {temp_file}")
-            
-            # Write file in binary mode
-            with open(temp_file, 'wb') as f:
-                for chunk in file.chunks():
-                    f.write(chunk)
+            # Upload to AssemblyAI
+            logger.info("Uploading file to AssemblyAI")
+            upload_url = self.upload_file(temp_file.name)
+            if not upload_url:
+                return Response({'error': 'Failed to upload file'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             try:
-                # Upload to AssemblyAI
-                logger.info("Uploading file to AssemblyAI")
-                upload_url = self.upload_file(temp_file)
-                logger.info(f"File uploaded successfully. URL: {upload_url}")
-
                 # Create transcription request
                 logger.info("Creating transcription request")
                 transcript = self.create_transcript(upload_url, language_code, auto_detect)
                 logger.info(f"Transcription request created: {transcript}")
 
+                # Store transcription in database
+                transcription = Transcription.objects.create(
+                    transcript_id=transcript['id'],
+                    user=request.user,
+                    status='queued',
+                    audio_url=upload_url,
+                    language_code=language_code or 'en'
+                )
+                logger.info(f"Created transcription record: {transcription.transcript_id}")
+
                 return Response({
                     'message': 'File uploaded and transcription started',
                     'transcript_id': transcript['id'],
-                    'status': 'processing'
+                    'status': 'queued'
                 }, status=status.HTTP_202_ACCEPTED)
 
-            finally:
-                # Clean up temporary file
-                if temp_file and os.path.exists(temp_file):
-                    logger.info(f"Cleaning up temporary file: {temp_file}")
-                    os.unlink(temp_file)
+            except Exception as e:
+                logger.error(f"Error creating transcription: {str(e)}")
+                return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         except Exception as e:
-            logger.error(f"Error processing upload: {str(e)}")
-            # Clean up temporary file in case of error
-            if temp_file and os.path.exists(temp_file):
+            logger.error(f"Error in upload: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        finally:
+            # Clean up temp file
+            if temp_file:
                 try:
-                    os.unlink(temp_file)
+                    os.unlink(temp_file.name)
                 except Exception as cleanup_error:
                     logger.error(f"Error cleaning up temporary file: {cleanup_error}")
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+
+    def list(self, request):
+        """List all transcriptions for the authenticated user, grouped by status"""
+        try:
+            # Sync with AssemblyAI first
+            sync_success = self.sync_with_assemblyai()
+            if not sync_success:
+                logger.warning("Failed to sync with AssemblyAI, returning local data only")
+            
+            # Get all transcriptions for the current user
+            transcriptions = Transcription.objects.filter(user=request.user).order_by('-created_at')
+            logger.info(f"Found {transcriptions.count()} transcriptions for user {request.user.username}")
+            
+            # Return paginated response
+            return self.get_paginated_transcriptions(transcriptions)
+
+        except Exception as e:
+            logger.error(f"Error listing transcriptions: {str(e)}")
+            return Response({
+                'error': 'Failed to retrieve transcriptions',
+                'details': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def retrieve(self, request, pk=None):
+        """Get transcription status or result"""
+        try:
+            if not pk:
+                return Response({
+                    "error": "Transcript ID is required"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Get result from AssemblyAI
+            result = self.get_transcript_result(pk)
+            
+            # Update transcription in database
+            try:
+                transcription = Transcription.objects.get(transcript_id=pk)
+                transcription.status = result.get('status', 'unknown')
+                transcription.text = result.get('text')
+                if result.get('status') == 'completed':
+                    transcription.completed_at = datetime.now(pytz.utc)
+                if result.get('error'):
+                    transcription.error = result.get('error')
+                transcription.save()
+            except Transcription.DoesNotExist:
+                logger.warning(f"Transcription {pk} not found in database")
+            
+            return Response(result)
+
+        except Exception as e:
+            logger.error(f"Error getting transcript {pk}: {str(e)}")
+            return Response({
+                "error": "Failed to get transcript",
+                "details": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
