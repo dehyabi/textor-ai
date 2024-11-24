@@ -18,7 +18,7 @@ A powerful Speech-to-Text API built with Django REST Framework and AssemblyAI. T
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/textor-ai.git
+git clone https://github.com/dehyabi/textor-ai.git
 cd textor-ai
 ```
 
