@@ -137,6 +137,102 @@ heroku open
 heroku logs --tail
 ```
 
+### Render Deployment
+
+#### Quick Deploy
+
+1. Fork this repository to your GitHub account.
+
+2. Visit [Render.com](https://render.com) and create an account if you haven't already.
+
+3. Click the "New +" button and select "Blueprint" from the dropdown.
+
+4. Connect your GitHub account and select your forked repository.
+
+5. Render will automatically detect the `render.yaml` configuration and set up your services.
+
+6. Set your AssemblyAI API key in the environment variables:
+   - Go to your web service settings
+   - Click on "Environment"
+   - Add `ASSEMBLYAI_API_KEY` with your API key
+
+7. Your app will be deployed automatically. The URL will be: `https://textor-ai.onrender.com`
+
+#### Manual Deployment
+
+1. Visit [Render.com](https://render.com) and create an account.
+
+2. Click the "New +" button and select "Web Service".
+
+3. Connect your GitHub repository.
+
+4. Fill in the following settings:
+   - **Name**: textor-ai
+   - **Environment**: Python
+   - **Region**: Oregon (or your preferred region)
+   - **Branch**: main
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `gunicorn speech_to_text_api.wsgi:application --bind 0.0.0.0:$PORT --workers 4 --threads 2`
+
+5. Add the following environment variables:
+   ```
+   PYTHON_VERSION=3.10.12
+   DJANGO_DEBUG=False
+   DJANGO_ALLOWED_HOSTS=.onrender.com
+   DJANGO_SETTINGS_MODULE=speech_to_text_api.settings
+   ASSEMBLYAI_API_KEY=your-api-key
+   ```
+
+6. Create a PostgreSQL database:
+   - Click "New +" and select "PostgreSQL"
+   - Choose the "Starter" plan
+   - Note the internal database URL
+
+7. Add the database URL to your web service:
+   - Go back to your web service settings
+   - Add `DATABASE_URL` with the internal database URL
+
+#### Post-Deployment
+
+1. Run migrations:
+   ```bash
+   # Using Render Shell
+   python manage.py migrate
+   ```
+
+2. Create a superuser:
+   ```bash
+   # Using Render Shell
+   python manage.py createsuperuser
+   ```
+
+#### Monitoring
+
+1. View logs:
+   - Go to your web service dashboard
+   - Click on "Logs" in the left sidebar
+
+2. Monitor metrics:
+   - Click on "Metrics" in the left sidebar
+   - View CPU, Memory, and Network usage
+
+#### Troubleshooting
+
+1. If static files are not serving:
+   ```bash
+   # Using Render Shell
+   python manage.py collectstatic --noinput
+   ```
+
+2. If you need to restart the service:
+   - Go to your web service dashboard
+   - Click "Manual Deploy" > "Deploy latest commit"
+
+3. Check application logs for errors:
+   - Go to your web service dashboard
+   - Click on "Logs"
+   - Select "All" to view all log types
+
 ### Container Deployment
 
 Textor-AI supports both traditional and containerized deployment on Heroku.
