@@ -18,11 +18,11 @@ A powerful Speech-to-Text API built with Django REST Framework and AssemblyAI. T
 
 1. Clone the repository:
 ```bash
-git clone [repository-url]
-cd be
+git clone https://github.com/yourusername/textor-ai.git
+cd textor-ai
 ```
 
-2. Create a virtual environment and activate it:
+2. Create and activate a virtual environment:
 ```bash
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
