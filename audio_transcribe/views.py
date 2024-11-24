@@ -3,7 +3,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
 from rest_framework import generics
 from rest_framework.viewsets import ViewSet
@@ -21,6 +21,8 @@ from dotenv import load_dotenv
 from datetime import datetime
 import pytz
 from tempfile import NamedTemporaryFile
+from django.contrib.auth.models import User
+from django.db.utils import IntegrityError
 
 load_dotenv()
 
@@ -88,9 +90,9 @@ class TranscriptionRateThrottle(UserRateThrottle):
 class AnonTranscriptionRateThrottle(AnonRateThrottle):
     """
     Rate limiting for anonymous users:
-    - 3 requests per day
+    - 5 requests per day
     """
-    rate = '3/day'
+    rate = '5/day'
 
 class TranscriptionPagination(PageNumberPagination):
     page_size = 10
@@ -117,7 +119,7 @@ class TranscriptionViewSet(ViewSet):
     ViewSet for handling audio file transcriptions
     """
     parser_classes = (MultiPartParser, FormParser)
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]  # Allow anonymous access
     authentication_classes = [BearerTokenAuthentication]
     throttle_classes = [TranscriptionRateThrottle, AnonTranscriptionRateThrottle]
     pagination_class = TranscriptionPagination
@@ -615,18 +617,82 @@ class TranscriptionViewSet(ViewSet):
 
         return paginator.get_paginated_response(response_data)
 
+    def get_or_create_anonymous_user(self):
+        """Get or create the default anonymous user"""
+        try:
+            anon_user, created = User.objects.get_or_create(
+                username='anonymous_user',
+                defaults={
+                    'email': 'anonymous@example.com',
+                    'is_active': True
+                }
+            )
+            if created:
+                logger.info("Created anonymous user")
+            return anon_user
+        except IntegrityError as e:
+            logger.error(f"Error creating anonymous user: {str(e)}")
+            return None
+
+    def get_request_user(self, request):
+        """Get the appropriate user for the request"""
+        if request.user.is_authenticated:
+            return request.user
+        return self.get_or_create_anonymous_user()
+
+    def list(self, request):
+        """List transcriptions for the user, grouped by status"""
+        try:
+            # Sync with AssemblyAI first
+            sync_success = self.sync_with_assemblyai()
+            if not sync_success:
+                logger.warning("Failed to sync with AssemblyAI, returning local data only")
+            
+            # Get all transcriptions for the current user
+            user = self.get_request_user(request)
+            if not user:
+                return Response({
+                    'error': 'Unable to process request. Please try again later.'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # Get transcriptions based on user type
+            if request.user.is_authenticated:
+                transcriptions = Transcription.objects.filter(user=user).order_by('-created_at')
+            else:
+                # For anonymous users, only show 5 most recent transcriptions
+                transcriptions = Transcription.objects.filter(user=user).order_by('-created_at')[:5]
+                logger.info(f"Limiting anonymous user to 5 most recent transcriptions")
+            
+            logger.info(f"Found {len(transcriptions)} transcriptions for user {user.username}")
+            
+            # Return paginated response
+            return self.get_paginated_transcriptions(transcriptions)
+
+        except Exception as e:
+            logger.error(f"Error listing transcriptions: {str(e)}")
+            return Response({
+                'error': 'Failed to retrieve transcriptions',
+                'details': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @action(detail=False, methods=['post'])
     def upload(self, request):
         """Upload audio file and start transcription"""
         temp_file = None
         try:
-            # Validate request
             if 'file' not in request.FILES:
                 return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
 
             file = request.FILES['file']
             language_code = request.POST.get('language_code', '')
             auto_detect = request.POST.get('auto_detect', 'true').lower() == 'true'
+
+            # Get appropriate user
+            user = self.get_request_user(request)
+            if not user:
+                return Response({
+                    'error': 'Unable to process request. Please try again later.'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             # Validate file size (5MB limit)
             if file.size > 5 * 1024 * 1024:
@@ -638,71 +704,52 @@ class TranscriptionViewSet(ViewSet):
                 temp_file.write(chunk)
             temp_file.close()
 
+            # Validate file
+            is_valid, error_message = self.validate_file(file)
+            if not is_valid:
+                return Response({'error': error_message}, status=status.HTTP_400_BAD_REQUEST)
+
             # Upload to AssemblyAI
-            logger.info("Uploading file to AssemblyAI")
             upload_url = self.upload_file(temp_file.name)
             if not upload_url:
-                return Response({'error': 'Failed to upload file'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-            try:
-                # Create transcription request
-                logger.info("Creating transcription request")
-                transcript = self.create_transcript(upload_url, language_code, auto_detect)
-                logger.info(f"Transcription request created: {transcript}")
-
-                # Store transcription in database
-                transcription = Transcription.objects.create(
-                    transcript_id=transcript['id'],
-                    user=request.user,
-                    status='queued',
-                    audio_url=upload_url,
-                    language_code=language_code or 'en'
-                )
-                logger.info(f"Created transcription record: {transcription.transcript_id}")
-
                 return Response({
-                    'message': 'File uploaded and transcription started',
-                    'transcript_id': transcript['id'],
-                    'status': 'queued'
-                }, status=status.HTTP_202_ACCEPTED)
+                    'error': 'Failed to upload file to AssemblyAI'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            except Exception as e:
-                logger.error(f"Error creating transcription: {str(e)}")
-                return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            # Start transcription
+            transcript_id = self.create_transcript(upload_url, language_code if language_code else None, auto_detect)
+            if not transcript_id:
+                return Response({
+                    'error': 'Failed to start transcription'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # Create transcription record
+            transcription = Transcription.objects.create(
+                transcript_id=transcript_id['id'],
+                user=user,
+                status='queued',
+                audio_url=upload_url,
+                language_code=language_code if language_code else 'auto'
+            )
+
+            return Response({
+                'transcript_id': transcript_id['id'],
+                'status': 'queued'
+            })
 
         except Exception as e:
             logger.error(f"Error in upload: {str(e)}")
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({
+                'error': 'Failed to process upload',
+                'details': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         finally:
-            # Clean up temp file
             if temp_file:
                 try:
                     os.unlink(temp_file.name)
-                except Exception as cleanup_error:
-                    logger.error(f"Error cleaning up temporary file: {cleanup_error}")
-
-    def list(self, request):
-        """List all transcriptions for the authenticated user, grouped by status"""
-        try:
-            # Sync with AssemblyAI first
-            sync_success = self.sync_with_assemblyai()
-            if not sync_success:
-                logger.warning("Failed to sync with AssemblyAI, returning local data only")
-            
-            # Get all transcriptions for the current user
-            transcriptions = Transcription.objects.filter(user=request.user).order_by('-created_at')
-            logger.info(f"Found {transcriptions.count()} transcriptions for user {request.user.username}")
-            
-            # Return paginated response
-            return self.get_paginated_transcriptions(transcriptions)
-
-        except Exception as e:
-            logger.error(f"Error listing transcriptions: {str(e)}")
-            return Response({
-                'error': 'Failed to retrieve transcriptions',
-                'details': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                except Exception as e:
+                    logger.error(f"Error removing temp file: {str(e)}")
 
     def retrieve(self, request, pk=None):
         """Get transcription status or result"""

@@ -55,26 +55,35 @@ python3 manage.py runserver
 
 ## Authentication
 
-The API uses token-based authentication. To get your token:
+Authentication is optional but recommended for higher rate limits. The API uses token-based authentication.
 
-1. Create a superuser if you haven't already:
+**With Authentication:**
 ```bash
-python3 manage.py createsuperuser
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  http://localhost:8000/api/transcribe/
 ```
 
-2. Log in to the Django admin interface at `http://localhost:8000/admin/` and create a token for your user.
-
-3. Use the token in your API requests:
+**Without Authentication:**
 ```bash
-Authorization: Bearer your_token_here
+curl http://localhost:8000/api/transcribe/
 ```
+
+See [Rate Limiting](#rate-limiting) section for details on request limits.
+
+### Obtaining an Authentication Token
+
+To get higher rate limits, you can obtain an authentication token:
+
+1. Create a user account through the Django admin interface
+2. Generate a token for your user
+3. Include the token in your API requests using the Authorization header
 
 ## API Endpoints
 
 ### 1. Upload Audio for Transcription
 - **URL:** `/api/transcribe/upload/`
 - **Method:** `POST`
-- **Authentication:** Required
+- **Authentication:** Optional
 - **Content-Type:** `multipart/form-data`
 - **Constraints:**
   - Maximum file size: 5MB
@@ -180,7 +189,7 @@ The response includes:
 ### 3. Get Transcription Status
 - **URL:** `/api/transcribe/{transcript_id}/`
 - **Method:** `GET`
-- **Authentication:** Required
+- **Authentication:** Optional
 - **Example:**
 ```bash
 curl -H "Authorization: Bearer your_token" \
@@ -202,7 +211,7 @@ curl -H "Authorization: Bearer your_token" \
 ### 4. Get All Transcriptions (Flat List)
 - **URL:** `/api/transcribe/`
 - **Method:** `GET`
-- **Authentication:** Required
+- **Authentication:** Optional
 - **Description:** Returns all transcriptions in a single flat list, sorted by creation date (newest first)
 - **Example:**
 ```bash
@@ -247,13 +256,16 @@ The API implements rate limiting to ensure fair usage:
 - **Authenticated Users:**
   - 25 requests per day
   - Resets at midnight UTC
-  - Applies to all API endpoints
+  - Access to all transcriptions
+  - Full pagination support
   - Rate limit headers included in response
 
 - **Anonymous Users:**
-  - 3 requests per day
+  - 5 requests per day
   - Resets at midnight UTC
-  - Access severely limited
+  - Limited to viewing 5 most recent transcriptions
+  - Same upload capabilities as authenticated users
+  - Consider authentication for full access
 
 **Rate Limit Response Headers:**
 ```
