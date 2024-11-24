@@ -1,0 +1,32 @@
+setup:
+  addons:
+    - plan: heroku-postgresql:mini
+      as: DATABASE
+    - plan: heroku-redis:mini
+      as: REDIS
+    - plan: papertrail:choklad
+      as: LOGS
+    - plan: newrelic:wayne
+      as: MONITORING
+  config:
+    DJANGO_SETTINGS_MODULE: speech_to_text_api.settings
+    PYTHONPATH: /app
+    DJANGO_DEBUG: False
+    DJANGO_ALLOWED_HOSTS: .herokuapp.com
+    WEB_CONCURRENCY: 4
+    PYTHON_MAX_THREADS: 32
+
+build:
+  docker:
+    web: Dockerfile
+  config:
+    PYTHONUNBUFFERED: 1
+
+release:
+  command:
+    - python manage.py migrate
+    - python manage.py collectstatic --noinput
+  image: web
+
+run:
+  web: gunicorn speech_to_text_api.wsgi:application --workers 4 --threads 2 --timeout 60 --max-requests 1200 --max-requests-jitter 100 --log-file -

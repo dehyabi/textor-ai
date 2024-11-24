@@ -1,0 +1,97 @@
+{
+  "name": "Textor-AI",
+  "description": "Multi-language speech-to-text transcription API",
+  "repository": "https://github.com/dehyabi/textor-ai",
+  "logo": "https://raw.githubusercontent.com/dehyabi/textor-ai/main/logo.png",
+  "keywords": ["python", "django", "speech-to-text", "transcription", "assemblyai", "api"],
+  "success_url": "/health/",
+  "stack": "heroku-22",
+  "env": {
+    "DJANGO_SECRET_KEY": {
+      "description": "A secret key for Django's cryptographic signing",
+      "generator": "secret"
+    },
+    "DJANGO_DEBUG": {
+      "description": "Debug mode",
+      "value": "False"
+    },
+    "ASSEMBLYAI_API_KEY": {
+      "description": "Your AssemblyAI API key",
+      "required": true
+    },
+    "DJANGO_ALLOWED_HOSTS": {
+      "description": "Comma-separated list of allowed hosts",
+      "value": ".herokuapp.com"
+    },
+    "DJANGO_SETTINGS_MODULE": {
+      "description": "Django settings module",
+      "value": "speech_to_text_api.settings"
+    },
+    "WEB_CONCURRENCY": {
+      "description": "Number of Gunicorn workers",
+      "value": "4"
+    },
+    "PYTHON_MAX_THREADS": {
+      "description": "Maximum number of threads per process",
+      "value": "32"
+    },
+    "MAX_REQUESTS": {
+      "description": "Maximum number of requests per worker before restart",
+      "value": "1200"
+    },
+    "MAX_REQUESTS_JITTER": {
+      "description": "Random jitter to add to max requests",
+      "value": "100"
+    }
+  },
+  "addons": [
+    {
+      "plan": "heroku-postgresql:mini",
+      "as": "DATABASE"
+    },
+    {
+      "plan": "heroku-redis:mini",
+      "as": "REDIS"
+    },
+    {
+      "plan": "papertrail:choklad",
+      "as": "LOGS"
+    },
+    {
+      "plan": "newrelic:wayne",
+      "as": "MONITORING"
+    }
+  ],
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "scripts": {
+    "postdeploy": "python manage.py migrate && python manage.py collectstatic --noinput"
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "environments": {
+    "review": {
+      "scripts": {
+        "postdeploy": "python manage.py migrate && python manage.py loaddata initial_data.json"
+      },
+      "env": {
+        "DJANGO_DEBUG": "True"
+      }
+    },
+    "test": {
+      "scripts": {
+        "test": "python manage.py test"
+      },
+      "addons": [
+        "heroku-postgresql:mini"
+      ]
+    }
+  }
+}
